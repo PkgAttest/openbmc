@@ -1414,7 +1414,14 @@
         'This approach is about substitution in the supply chain \u2014 a ' +
         'different package arriving in a build. It is not about compromise ' +
         'of a running system, and nothing here should be read as covering ' +
-        'the second.'
+        'the second.',
+        'It is narrower than it was. pkgattest verify-ima reads a Linux ' +
+        'IMA measurement log and judges each event against these ' +
+        'measurements, which catches a measured path whose content changed ' +
+        'and a path that executed while belonging to no package. That is ' +
+        'load-time evidence, not runtime: code that never touches the ' +
+        'filesystem, or that is gone before the next measurement, still ' +
+        'leaves nothing behind. The objection stands; it covers less ground.'
       ]
     },
     {
@@ -1453,7 +1460,22 @@
         'The limit of the rebuttal, stated plainly: a verifier that parses ' +
         'the IMA log can reconstruct state too, and this approach equally ' +
         'needs its measurement list. The claim is that the root is ' +
-        'comparable, not that IMA cannot get there.'
+        'comparable, not that IMA cannot get there.',
+        'The better answer is that they are opposite halves. IMA produces ' +
+        'evidence and has never had a trustworthy source of reference ' +
+        'values to judge it against \u2014 Keylime, its main consumer, builds ' +
+        'a runtime policy by recording the log of a machine you already ' +
+        'believe is clean, and its own documentation calls the helper ' +
+        'scripts reference points rather than complete solutions. This ' +
+        'produces reference values derived from the build and published to ' +
+        'a log, and no runtime evidence at all. In RFC 9334 terms IMA is ' +
+        'the Attester and this is a Reference Value Provider; a Verifier is ' +
+        'meant to hold both.',
+        'pkgattest verify-ima is that comparison, and its --anchor flag ' +
+        'proves every package leaf it relied on is in the log first \u2014 ' +
+        'without which a tampered filesystem shipped with a matching ' +
+        'measurement document reads clean, which is the failure this ' +
+        'whole project exists to make visible.'
       ]
     },
     {

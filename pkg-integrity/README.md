@@ -56,6 +56,8 @@ pkgattest verify-image image_A=artifacts/A/….ext4.mmc.tar image_B=…
 pkgattest verify-sth [--sth-file saved-sth.json] [--print-payload]
 pkgattest verify-package dropbear [--version 2026.92] [--image-line rpi3-openbmc]
 pkgattest verify-measurements artifacts/A/….pkg-measurements.json
+pkgattest verify-ima /sys/kernel/security/ima/ascii_runtime_measurements \
+    --measurements artifacts/D/….pkg-measurements.json --anchor
 pkgattest attest --host raspberrypi3-64.local
 ```
 
@@ -70,6 +72,25 @@ pkgattest attest --host raspberrypi3-64.local
 - `verify-measurements` — recomputes every package leaf and the merkle root
   of a build `pkg-measurements.json` (the publisher's drift gate, run by
   hand).
+- `verify-ima` — cross-references a Linux IMA measurement log against a
+  build's measurements. IMA produces evidence and has no trustworthy source
+  of reference values; this produces reference values and no runtime
+  evidence, so the two compose (RFC 9334: Attester and Reference Value
+  Provider). Every event lands in one of *matched*, *modified* (measured
+  path, different content), *unmeasured* (ran, and no package installed it),
+  *incomparable* (a sha1 log against sha256 measurements) or
+  *boot_aggregate*. The middle two are runtime findings neither half can
+  reach alone.
+  **Use `--anchor`**: without it the reference values are only
+  self-consistent, so a tampered filesystem shipped with a matching
+  measurement document reads clean. `--anchor` proves every package leaf in
+  the document is in the transparency log first — all of them, not just the
+  ones a verdict touched, because the *unmeasured* verdict rests on no
+  package owning the path and a forged extra package would otherwise
+  launder an intruder into a match.
+  This is load-time evidence. Code that never touches the filesystem, or
+  that is gone before the next measurement, leaves nothing here either —
+  it narrows TOCTOU, it does not close it.
 - `attest` — the full Beat-3/4 device chain (same engine as `verify.py`).
 
 Exit codes: `0` verified, `1` verification failure, `2` operational error.

@@ -8,6 +8,9 @@ Subcommands:
   verify-package       per-package inclusion proof against the tree head
   verify-measurements  build measurement document: recompute every package
                        leaf and the merkle root
+  verify-ima           a Linux IMA measurement log against those package
+                       measurements: what ran, what was modified, and what
+                       ran that no package installed
   attest               full device attestation chain (nonce -> ssh collect
                        -> root -> PCR14 -> TPM quote -> inclusion proofs)
 
@@ -21,7 +24,7 @@ import json
 import os
 import sys
 
-from . import canonical, imagesig, merkle
+from . import canonical, imagesig, imalog, merkle
 from .canonical import abbrev, display_version
 from .logclient import LogClient
 
@@ -245,6 +248,173 @@ def cmd_verify_measurements(args):
     return rc
 
 
+# ------------------------------------------------------------------ verify-ima
+def cmd_verify_ima(args):
+    """Judge an IMA event stream against build-derived reference values.
+
+    IMA has evidence and no reference values; this has reference values and
+    no runtime evidence. Comparing them is the whole point, and it produces
+    two findings neither side can reach alone: a measured path whose content
+    changed, and a path that executed while belonging to no package.
+    """
+    try:
+        doc = canonical.load_measurements_json(args.measurements)
+    except (OSError, ValueError) as e:
+        print("verify-ima: %s" % e, file=sys.stderr)
+        return 2
+
+    problems = canonical.verify_measurements_doc(doc)
+    if problems:
+        print("verify-ima: the measurement document does not recompute (%s); "
+              "refusing to judge anything against it" % problems[0],
+              file=sys.stderr)
+        return 2
+
+    try:
+        with open(args.ima_log, encoding="utf-8", errors="replace") as f:
+            events = imalog.parse_log(f.read())
+    except OSError as e:
+        print("verify-ima: %s" % e, file=sys.stderr)
+        return 2
+    except imalog.ImaParseError as e:
+        print("verify-ima: %s" % e, file=sys.stderr)
+        return 2
+
+    index = imalog.file_index(doc)
+    result = imalog.cross_reference(events, index)
+    bad = imalog.findings(result)
+
+    # Without this, the reference values are only self-consistent: a tampered
+    # rootfs shipped with a matching measurement document passes clean, which
+    # is the exact "trust the vendor's own claim" pattern this project exists
+    # to break.
+    #
+    # Every package leaf is anchored, not just the ones a verdict touched.
+    # The "unmeasured" verdict rests on *no* package owning the path, so a
+    # forged extra package in the document would launder a real intruder into
+    # a match. Only proving the whole set is in the log closes that.
+    anchor = None
+    if args.anchor:
+        try:
+            client = LogClient(args.log)
+            pub = merkle.load_ed25519_public(args.log_pub)
+            sth = client.sth()
+        except Exception as e:
+            print("verify-ima: --anchor: %s" % e, file=sys.stderr)
+            return 2
+        if not merkle.verify_sth(pub, sth):
+            print("verify-ima: --anchor: the tree head is not validly signed "
+                  "by %s" % args.log_pub, file=sys.stderr)
+            return 2
+
+        tree_size = sth["tree_size"]
+        root_bytes = bytes.fromhex(sth["root_hash"])
+        wanted = {}
+        for pkg in doc["packages"]:
+            data = canonical.log_leaf_data(doc["image_line"], pkg["name"],
+                                           pkg["version"], pkg["arch"],
+                                           pkg["leaf_hash"])
+            wanted[merkle.leaf_hash(data).hex()] = pkg["name"]
+
+        missing = []
+        hashes = sorted(wanted)
+        for i in range(0, len(hashes), 200):   # server caps a batch at 256
+            chunk = hashes[i:i + 200]
+            try:
+                proofs = client.proofs_batch(chunk, tree_size)["proofs"]
+            except Exception as e:
+                print("verify-ima: --anchor: %s" % e, file=sys.stderr)
+                return 2
+            for lh in chunk:
+                pr = proofs.get(lh)
+                ok = bool(pr) and merkle.verify_inclusion(
+                    bytes.fromhex(lh), pr["index"], tree_size,
+                    [bytes.fromhex(x) for x in pr["path"]], root_bytes)
+                if not ok:
+                    missing.append(wanted[lh])
+        anchor = {"tree_size": tree_size, "root": sth["root_hash"],
+                  "packages": len(wanted), "missing": sorted(missing)}
+
+
+    if args.json:
+        print(json.dumps({
+            "measurements": args.measurements,
+            "ima_log": args.ima_log,
+            "events": len(events),
+            "counts": {k: v for k, v, _ in imalog.summarise(result)},
+            "modified": [{"path": e["path"], "package": e["package"],
+                          "expected": e["expected"], "loaded": e["digest"]}
+                         for e in result["modified"]],
+            "unmeasured": [e["path"] for e in result["unmeasured"]],
+            "anchor": anchor,
+            "ok": not bad and not (anchor and anchor["missing"]),
+        }, indent=1))
+        return 0 if not bad and not (anchor and anchor["missing"]) else 1
+
+    print("IMA log: %d events, against %d measured files in %d packages"
+          % (len(events), len(index), len(doc["packages"])))
+    if anchor is None:
+        print("  reference values: UNANCHORED - taken from %s on trust."
+              % os.path.basename(args.measurements))
+        print("                    re-run with --anchor to prove they are in "
+              "the log.")
+    elif anchor["missing"]:
+        print("  reference values: %d of %d package leaves are NOT in the log "
+              "at size %d" % (len(anchor["missing"]), anchor["packages"],
+                              anchor["tree_size"]))
+        for name in anchor["missing"][:10]:
+            print("      unanchored: %s" % name)
+        if len(anchor["missing"]) > 10:
+            print("      ... and %d more" % (len(anchor["missing"]) - 10))
+    else:
+        print("  reference values: all %d package leaves proved present in "
+              "the log" % anchor["packages"])
+        print("                    at size %d, root %s"
+              % (anchor["tree_size"],
+                 anchor["root"] if args.full else abbrev(anchor["root"])))
+    for name, count, note in imalog.summarise(result):
+        if count or name in ("matched", "modified", "unmeasured"):
+            print("  %-14s %6d   %s" % (name, count, note))
+
+    if result["modified"]:
+        print()
+        print("MODIFIED — the build put different bytes at these paths:")
+        for e in result["modified"]:
+            print("  %s" % e["path"])
+            print("      build  %s  (%s)" % (abbrev(e["expected"]),
+                                              e["package"]))
+            print("      loaded %s  <- what the kernel actually saw"
+                  % abbrev(e["digest"]))
+
+    if result["unmeasured"]:
+        print()
+        print("UNMEASURED — these ran, and no package installed them:")
+        for e in result["unmeasured"][:20]:
+            print("  %s" % e["path"])
+        if len(result["unmeasured"]) > 20:
+            print("  ... and %d more" % (len(result["unmeasured"]) - 20))
+
+    print()
+    unanchored = len(anchor["missing"]) if anchor else 0
+    if bad or unanchored:
+        if unanchored:
+            print("FAIL: %d package %s the log has never seen -- the "
+                  "reference values"
+                  % (unanchored, "leaf" if unanchored == 1 else "leaves"))
+            print("      themselves are unproven, so no verdict below is "
+                  "worth much.")
+        if bad:
+            print("FAIL: %d event(s) the build does not account for"
+                  % len(bad))
+    else:
+        print("OK: every event is accounted for by a measured package.")
+        print("    This is load-time evidence. Code that never touches the "
+              "filesystem, or")
+        print("    that is gone before the next measurement, leaves nothing "
+              "here either.")
+    return 0 if not bad and not unanchored else 1
+
+
 # ------------------------------------------------------------------------ main
 def main(argv=None):
     argv = list(sys.argv[1:]) if argv is None else list(argv)
@@ -307,6 +477,20 @@ def main(argv=None):
     add_log_opts(p)
     add_common(p)
     p.set_defaults(func=cmd_verify_package)
+
+    p = sub.add_parser("verify-ima",
+                       help="cross-reference a Linux IMA measurement log "
+                            "against package measurements")
+    p.add_argument("ima_log", metavar="IMA_LOG",
+                   help="ascii_runtime_measurements, or a copy of it")
+    p.add_argument("--measurements", required=True,
+                   metavar="pkg-measurements.json")
+    p.add_argument("--anchor", action="store_true",
+                   help="prove every package leaf in the document is in the "
+                        "transparency log (needs --log)")
+    add_log_opts(p)
+    add_common(p)
+    p.set_defaults(func=cmd_verify_ima)
 
     p = sub.add_parser("verify-measurements",
                        help="recompute leaves + root of build measurement "

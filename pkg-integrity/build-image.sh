@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-image.sh {A|B|C|D} — build the OCP-2026 demo images.
+# build-image.sh {A|B|C|D|E} — build the OCP-2026 demo images.
 #   A: baseline image (dropbear 2026.92), package-aware measurement enabled.
 #   B: identical except dropbear pinned back to 2026.91. Never published.
 #   D: first build carrying the (unowned) leaf, so that files no package
@@ -9,6 +9,11 @@
 #      gets a second signed tree head — consistency proofs need two. C must
 #      never alter A or B: their artifacts are already copied into
 #      artifacts/{A,B}/ and are not rebuilt.
+#   E: D plus Linux IMA (measurement only) and the suggested policy, so the
+#      device can produce a runtime measurement log for `pkgattest
+#      verify-ima`. Enabling IMA changes the kernel config, so every
+#      kernel-module-* package's contents change with it — E is the build
+#      that shows what a kernel change costs in the log.
 #
 # Replicates rpi3-build.sh's conf generation (the meta-evb-raspberrypi
 # template has no layer.conf, so conf files are pre-generated), then adds the
@@ -17,7 +22,7 @@
 set -e
 
 VARIANT="${1:-}"
-case "$VARIANT" in A|B|C|D) ;; *) echo "usage: $0 {A|B|C|D}" >&2; exit 2 ;; esac
+case "$VARIANT" in A|B|C|D|E) ;; *) echo "usage: $0 {A|B|C|D|E}" >&2; exit 2 ;; esac
 
 # BUILD_ID pins os-release's BUILD_ID (a measured file). C uses a distinct one
 # so it is a genuinely different build of the same source.
@@ -25,6 +30,7 @@ case "$VARIANT" in
     A|B) BUILD_ID_VAL="ocp2026-demo" ;;
     C)   BUILD_ID_VAL="ocp2026-demo-c" ;;
     D)   BUILD_ID_VAL="ocp2026-demo-d" ;;
+    E)   BUILD_ID_VAL="ocp2026-demo-e" ;;
 esac
 
 # DEMO_ROOT = parent of this script's dir (works from any clone location);
@@ -78,6 +84,19 @@ EOF
 
 if [ "$VARIANT" = "B" ]; then
     echo 'PREFERRED_VERSION_dropbear = "2026.91"' >> "$BUILD/conf/local.conf"
+fi
+
+if [ "$VARIANT" = "E" ]; then
+    # Measurement-only IMA. ima_policy=tcb is the kernel's built-in policy
+    # and covers early boot, which a policy loaded later through securityfs
+    # cannot; ima-policy.service then narrows it to the shipped rules.
+    # ima_template and ima_hash are pinned rather than left to the kernel
+    # default so the log is parseable and comparable: ima-ng carries the
+    # pathname, and sha256 is what pkg-leaf-v1 uses.
+    cat >> "$BUILD/conf/local.conf" <<'IMAEOF'
+PKG_INTEGRITY_IMA = "1"
+CMDLINE_PKG_INTEGRITY = "ima_policy=tcb ima_template=ima-ng ima_hash=sha256"
+IMAEOF
 fi
 
 unset TEMPLATECONF

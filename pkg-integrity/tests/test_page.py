@@ -638,3 +638,76 @@ def test_objections_page_cites_its_sources(bundle):
                 "Sigstore Rekor", "CoRIM-based reference measurement"):
         assert src in out, src
     assert "will not resolve from the offline copy" in out
+
+
+# ------------------------------------------------------- runtime / IMA view
+@needs
+def test_runtime_page_frames_ima_as_the_missing_half(bundle):
+    out = render(bundle, "--hash", "#/runtime")
+    # The claim that makes the two compose rather than compete.
+    assert "Reference Value Provider" in out
+    assert "Attester" in out
+    assert "Keylime" in out
+    # All five verdicts a cross-reference can produce must be named, or a
+    # reader cannot tell what the tool would say.
+    for verdict in ("matched", "modified", "unmeasured", "incomparable",
+                    "boot_aggregate"):
+        assert verdict in out, verdict
+
+
+@needs
+def test_runtime_page_insists_on_anchoring(bundle):
+    # The page must not present verify-ima without the flag that makes its
+    # reference values worth anything.
+    out = render(bundle, "--hash", "#/runtime")
+    assert "--anchor" in out
+    assert "self-consistent" in out
+
+
+@needs
+def test_runtime_page_prints_the_classifier_it_used(bundle):
+    # The scope percentage is derived from paths, not from a mode bit. A
+    # number like that is only honest if the rule producing it is visible.
+    out = render(bundle, "--hash", "#/runtime")
+    assert "classified by path" in out
+    assert "\\.ko(" in out and "firmware" in out
+    assert "In scope is not the same as measured" in out
+
+
+@needs
+def test_runtime_page_concedes_what_it_cannot_do(bundle):
+    out = render(bundle, "--hash", "#/runtime")
+    assert "PCR 10 is not extended" in out
+    assert "TPM-bypass" in out
+    assert "load-time evidence" in out
+    assert "No device has booted it." in out
+
+
+@needs
+def test_runtime_scope_is_a_real_count_not_a_placeholder(bundle):
+    out = render(bundle, "--hash", "#/runtime")
+    m = re.findall(r"([\d,]+) of ([\d,]+) measured files", out)
+    assert m, "no per-build scope line rendered"
+    for got, total in m:
+        got_n = int(got.replace(",", ""))
+        total_n = int(total.replace(",", ""))
+        assert 0 < got_n < total_n, (got, total)
+        # Kernel modules alone are most of the file set, so a classifier
+        # that had silently stopped matching would fall well under half.
+        assert got_n > total_n * 0.4
+
+
+@needs
+def test_objections_page_answers_who_wrote_the_policy(bundle):
+    out = render(bundle, "--hash", "#/objections")
+    assert "You wrote the IMA policy" in out
+    assert "POLICY_CHECK" in out
+    # And still concedes the part that is not closed.
+    assert "nothing forces an operator to load this policy" in out
+
+
+@needs
+def test_objections_page_concedes_the_unbacked_log(bundle):
+    out = render(bundle, "--hash", "#/objections")
+    assert "just a text file" in out
+    assert "does not make the log authentic" in out

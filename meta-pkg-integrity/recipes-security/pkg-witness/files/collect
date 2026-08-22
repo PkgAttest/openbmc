@@ -30,8 +30,18 @@ printf '{"machine":"%s","version":"%s","timestamp":"%s","nonce":"%s","status":"%
     "$(hostname)" "$VERSION_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$NONCE" \
     "$(cat status 2>/dev/null || echo unknown)" > meta.json
 
+# The IMA log, when the kernel produced one. It is evidence about what ran,
+# which nothing else in this bundle covers; pkgattest verify-ima adjudicates
+# it against the build's measurements. Copied rather than referenced because
+# securityfs cannot be tarred directly, and copied last so it is as close to
+# the quote as the ordering allows.
+IMA=/sys/kernel/security/ima/ascii_runtime_measurements
+if [ -r "$IMA" ]; then
+    cp "$IMA" ima-log 2>/dev/null || rm -f ima-log
+fi
+
 FILES="measurement-list root.hex meta.json"
-for f in pcr14.hex ak.pub.pem quote.msg quote.sig pcrs.bin; do
+for f in pcr14.hex ak.pub.pem quote.msg quote.sig pcrs.bin ima-log; do
     [ -e "$f" ] && FILES="$FILES $f"
 done
 exec tar -cf - $FILES

@@ -508,7 +508,12 @@
     alink.href = '#/assessment';
     more.appendChild(alink);
     more.appendChild(document.createTextNode(
-      ' \u2014 what an audit can and cannot say about what you are running.'));
+      ' \u2014 what an audit can and cannot say about what you are running. '));
+    var rlink = el('a', null, 'Runtime measurement');
+    rlink.href = '#/runtime';
+    more.appendChild(rlink);
+    more.appendChild(document.createTextNode(
+      ' \u2014 what an IMA log adds, and what it still cannot see.'));
     view.appendChild(more);
   }
 
@@ -1415,13 +1420,16 @@
         'different package arriving in a build. It is not about compromise ' +
         'of a running system, and nothing here should be read as covering ' +
         'the second.',
-        'It is narrower than it was. pkgattest verify-ima reads a Linux ' +
-        'IMA measurement log and judges each event against these ' +
-        'measurements, which catches a measured path whose content changed ' +
+        'It is narrower than it was. One image in this line is built with ' +
+        'CONFIG_IMA and ships a measurement policy, and pkgattest ' +
+        'verify-ima judges each event in the kernel\'s log against these ' +
+        'measurements \u2014 catching a measured path whose content changed, ' +
         'and a path that executed while belonging to no package. That is ' +
         'load-time evidence, not runtime: code that never touches the ' +
         'filesystem, or that is gone before the next measurement, still ' +
-        'leaves nothing behind. The objection stands; it covers less ground.'
+        'leaves nothing behind. No device has booted that image yet, so ' +
+        'nothing here has been observed. The objection stands; it covers ' +
+        'less ground than it did.'
       ]
     },
     {
@@ -1476,6 +1484,48 @@
         'without which a tampered filesystem shipped with a matching ' +
         'measurement document reads clean, which is the failure this ' +
         'whole project exists to make visible.'
+      ]
+    },
+    {
+      verdict: 'answered', label: 'answered, and checkable',
+      claim: 'You wrote the IMA policy, so you decide what gets caught.',
+      body: [
+        'True, and it would be a real hole if the policy were unverifiable. ' +
+        'An IMA policy that measures nothing produces a clean log, and a ' +
+        'clean log from no rules is indistinguishable from a clean log from ' +
+        'good rules unless you can see which rules were in force.',
+        'Two things close it. The policy ships as an ordinary package, so ' +
+        'its file is measured like any other file and its leaf is in the ' +
+        'transparency log \u2014 you can look up the exact bytes and diff them ' +
+        'against what you think the policy should be. And the policy ' +
+        'includes measure func=POLICY_CHECK, so loading it emits an IMA ' +
+        'event for the policy file itself; that event cross-references back ' +
+        'to the published package. A policy swapped at boot changes that ' +
+        'event, and a policy never loaded leaves the event absent.',
+        'What is not closed: nothing forces an operator to load this policy ' +
+        'rather than an empty one, and this page cannot tell you which they ' +
+        'did. It can only tell you that the log they hand you either ' +
+        'contains the POLICY_CHECK event for the published policy or does ' +
+        'not.'
+      ]
+    },
+    {
+      verdict: 'conceded', label: 'simply right',
+      claim: 'An IMA log with no PCR behind it is just a text file.',
+      body: [
+        'Correct, and on this image it is exactly that. The board has no ' +
+        'TPM chip; the demo TPM is swtpm behind a vtpm-proxy module and a ' +
+        'userspace daemon that starts long after IMA initialises, so IMA ' +
+        'finds nothing at init and runs in what the kernel calls ' +
+        'TPM-bypass: the measurement log is written in full and PCR 10 is ' +
+        'never extended. Nothing signs the log, and a compromised host can ' +
+        'hand you any text it likes.',
+        'The honest scope of the IMA work here is therefore: it makes a ' +
+        'log adjudicable, which nobody could do before, against reference ' +
+        'values that are themselves published. It does not make the log ' +
+        'authentic. Those are different problems and only the first one is ' +
+        'solved. A real TPM present at boot would let a quote cover PCR ' +
+        '10; a proxy that appears late cannot.'
       ]
     },
     {
@@ -1602,6 +1652,259 @@
     var back = el('p', 'prose');
     var l1 = el('a', null, 'What this page does not prove');
     l1.href = '#/limits';
+    back.appendChild(l1);
+    back.appendChild(document.createTextNode(' \u00b7 '));
+    var l2 = el('a', null, 'Back to the verification');
+    l2.href = '#/';
+    back.appendChild(l2);
+    view.appendChild(back);
+  }
+
+  // ------------------------------------------------------------ runtime view
+  /* What an IMA log adds, and what it does not.
+   *
+   * The one number this page computes is scope: how many measured files a
+   * rule in the shipped policy can even apply to. It is derived from paths,
+   * because the measurement document records a path and a digest and nothing
+   * else -- no mode bit, no ELF type. So it is stated as what it is, and the
+   * classifier is printed next to the number rather than hidden. */
+  var IMA_POLICY_NAME = 'ima-policy';
+
+  var IMA_RULES = [
+    ['measure func=BPRM_CHECK', 'everything executed',
+     'The rule that makes "a path that ran and belongs to no package" ' +
+     'detectable at all.'],
+    ['measure func=MMAP_CHECK mask=MAY_EXEC', 'every shared object mapped',
+     'Without it a program whose binary is untouched but whose libc was ' +
+     'swapped measures clean.'],
+    ['measure func=MODULE_CHECK', 'kernel modules',
+     'On this image kernel-module-* is most of the package set, so leaving ' +
+     'these out would exclude most of it from any runtime check.'],
+    ['measure func=FIRMWARE_CHECK', 'firmware pulled from the rootfs',
+     'Installed by packages, loaded into devices, invisible to every other ' +
+     'rule here.'],
+    ['measure func=POLICY_CHECK', 'the policy itself',
+     'Without it a log is uninterpretable: no findings and no rules look ' +
+     'identical.']
+  ];
+
+  function inImaScope(path) {
+    // Mirrors the four content rules above, as closely as a path allows.
+    if (/\.ko(\.[a-z0-9]+)?$/.test(path)) return 'module';
+    if (/\/(lib|usr\/lib)\/firmware\//.test(path)) return 'firmware';
+    if (/\.so($|\.)/.test(path)) return 'library';
+    if (/^\/(usr\/)?(s?bin|libexec)\//.test(path)) return 'program';
+    return null;
+  }
+
+  function imaScope(r) {
+    return r.builds.map(function (b) {
+      var hasPolicy = false, total = 0;
+      var kinds = { program: 0, library: 0, module: 0, firmware: 0 };
+      if (b.pkgs) {
+        b.pkgs.forEach(function (row) {
+          if (row[0] === IMA_POLICY_NAME) hasPolicy = true;
+        });
+      }
+      if (b.filesByName) {
+        Object.keys(b.filesByName).forEach(function (name) {
+          b.filesByName[name].forEach(function (f) {
+            total++;
+            var k = inImaScope(f[0]);
+            if (k) kinds[k]++;
+          });
+        });
+      }
+      var inScope = kinds.program + kinds.library + kinds.module +
+                    kinds.firmware;
+      return { label: b.meta.label, hasPolicy: hasPolicy, total: total,
+               inScope: inScope, kinds: kinds };
+    });
+  }
+
+  function renderRuntime(r) {
+    clear(view);
+    var scope = imaScope(r);
+    var withIma = scope.filter(function (s) { return s.hasPolicy; });
+
+    view.appendChild(el('p', 'eyebrow', 'runtime measurement'));
+    view.appendChild(el('p', 'thesis', withIma.length
+      ? 'Linux IMA has evidence and no reference values. This has reference ' +
+        'values and no evidence.'
+      : 'No build in this snapshot carries an IMA policy.'));
+
+    view.appendChild(el('p', 'prose',
+      'Everything else on this site is measured at rest: the build hashed ' +
+      'each file, and the device re-hashed them at boot. Neither says ' +
+      'anything about what actually ran. IMA does say that \u2014 the kernel ' +
+      'records an event per file as it is executed or mapped \u2014 but it has ' +
+      'never had a trustworthy source of reference values to judge those ' +
+      'events against. Keylime, its main consumer, builds a runtime policy ' +
+      'by recording the log of a machine you already believe is clean, and ' +
+      'its own documentation calls the helper scripts reference points ' +
+      'rather than complete solutions.'));
+    view.appendChild(el('p', 'prose',
+      'The two are opposite halves. RFC 9334 already names both roles: the ' +
+      'device running IMA is the Attester producing Evidence, and a ' +
+      'transparency log of per-package measurements is a Reference Value ' +
+      'Provider. A Verifier is meant to hold both at once, and until now ' +
+      'the second half has been the one nobody supplies.'));
+
+    view.appendChild(el('h2', null, 'What the comparison produces'));
+    var tbl = el('div', 'vocab');
+    [['', 'verdict', 'means'],
+     ['both agree', 'matched', 'the path and the digest are in a measured package'],
+     ['content moved', 'modified', 'the path is measured, the bytes are not the built ones'],
+     ['nothing owns it', 'unmeasured', 'it ran, and no package installed it'],
+     ['wrong algorithm', 'incomparable', 'a sha1 log cannot be judged against sha256 measurements'],
+     ['not a file', 'boot_aggregate', 'the PCR0-7 aggregate']
+    ].forEach(function (cols, i) {
+      var vr = el('div', 'vocab-row' + (i === 0 ? ' is-head' : ''));
+      cols.forEach(function (c, j) {
+        vr.appendChild(el('div', j === 0 ? 'vocab-what' : 'vocab-cell', c));
+      });
+      tbl.appendChild(vr);
+    });
+    view.appendChild(tbl);
+    view.appendChild(el('p', 'prose',
+      'The middle two are runtime findings. Measuring at rest cannot ' +
+      'produce them, and IMA on its own cannot either, because on its own ' +
+      'it has nothing to compare against.'));
+
+    var cmd = el('pre', 'cmd');
+    cmd.textContent =
+      'pkgattest verify-ima /sys/kernel/security/ima/ascii_runtime_measurements \\\n' +
+      '    --measurements pkg-measurements.json --anchor';
+    view.appendChild(cmd);
+
+    var warn = el('div', 'caution');
+    warn.appendChild(el('div', 'caution-head', 'Why --anchor is not optional'));
+    warn.appendChild(el('p', 'prose',
+      'Without it the reference values are only self-consistent, and a ' +
+      'tampered filesystem shipped with a matching measurement document ' +
+      'reads clean \u2014 which is the exact failure this whole site exists to ' +
+      'make visible. --anchor proves every package leaf in the document is ' +
+      'in the log first. Every one, not just the ones a verdict touched: ' +
+      'the unmeasured verdict rests on no package owning the path, so a ' +
+      'forged extra package would otherwise launder an intruder into a ' +
+      'match.'));
+    view.appendChild(warn);
+
+    view.appendChild(el('h2', null, 'The policy this image ships'));
+    view.appendChild(el('p', 'prose',
+      'IMA has no path-based matching \u2014 there is no way to write "measure ' +
+      '/usr, skip /var". Rules match on function, mask, uid, filesystem ' +
+      'type and LSM label. So scope is chosen by function instead, and the ' +
+      'rule is: measure code, not data. That set is almost exactly the set ' +
+      'a package installs and never modifies, which is the set the build ' +
+      'measured.'));
+    var rules = el('div', 'vocab');
+    IMA_RULES.forEach(function (row, i) {
+      var vr = el('div', 'vocab-row');
+      vr.appendChild(el('div', 'vocab-what', row[0]));
+      vr.appendChild(el('div', 'vocab-cell', row[1]));
+      vr.appendChild(el('div', 'vocab-cell', row[2]));
+      rules.appendChild(vr);
+    });
+    view.appendChild(rules);
+
+    view.appendChild(el('h2', null, 'What was deliberately left out'));
+    [['func=FILE_CHECK mask=^MAY_READ euid=0',
+      'The kernel\'s built-in tcb policy measures every file root ' +
+      'reads. ' +
+      'On a BMC that is journal segments, lease files, state under ' +
+      '/var/lib \u2014 thousands of events per boot, none installed by a ' +
+      'package, all of them landing in the unmeasured bucket. The finding ' +
+      'that matters would be buried under state files that were never ' +
+      'supposed to belong to a package. Narrow beats complete here.'],
+     ['appraise',
+      'Enforcement, not measurement. It needs a signed security.ima xattr ' +
+      'on every file and a key in the kernel keyring; without both the ' +
+      'board does not boot. It also answers a different question: ' +
+      'appraisal asks may this run, the log asks was this ever published.']
+    ].forEach(function (pair) {
+      var box = el('div', 'limit');
+      box.appendChild(el('div', 'objection-claim', pair[0]));
+      box.appendChild(el('p', 'prose', pair[1]));
+      view.appendChild(box);
+    });
+
+    view.appendChild(el('h2', null, 'How much of each build the policy can see'));
+    view.appendChild(el('p', 'prose',
+      'A file is in scope when a rule above can apply to it. The ' +
+      'measurement document records a path and a digest and nothing else ' +
+      '\u2014 no mode bit, no ELF header \u2014 so this is classified by path, and ' +
+      'the classifier is printed below rather than hidden.'));
+    var stats = el('div', 'stats');
+    scope.forEach(function (s) {
+      var st = el('div', 'stat');
+      st.appendChild(el('div', 'stat-value',
+        s.total ? pct(s.inScope, s.total) : '--'));
+      st.appendChild(el('div', 'stat-label', 'build ' + s.label +
+        (s.hasPolicy ? ' (IMA)' : '')));
+      st.appendChild(el('p', 'prose dim', s.total
+        ? group(s.inScope) + ' of ' + group(s.total) + ' measured files: ' +
+          group(s.kinds.program) + ' programs, ' +
+          group(s.kinds.library) + ' libraries, ' +
+          group(s.kinds.module) + ' modules, ' +
+          group(s.kinds.firmware) + ' firmware'
+        : 'file list not loaded'));
+      stats.appendChild(st);
+    });
+    view.appendChild(stats);
+
+    var cls = el('pre', 'bytes');
+    cls.textContent =
+      'module    /\\.ko(\\.[a-z0-9]+)?$/\n' +
+      'firmware  m{/(lib|usr/lib)/firmware/}\n' +
+      'library   /\\.so($|\\.)/\n' +
+      'program   m{^/(usr/)?(s?bin|libexec)/}';
+    view.appendChild(cls);
+
+    view.appendChild(el('p', 'prose dim',
+      'In scope is not the same as measured. Only what actually runs ' +
+      'produces an event, so a real log is a subset of this, never a ' +
+      'superset \u2014 and a script executed from a directory not listed above ' +
+      'is measured by BPRM_CHECK while counting as out of scope here. The ' +
+      'number is a shape, not a total.'));
+
+    view.appendChild(el('h2', null, 'What this still does not do'));
+    [['No device has booted it.',
+      withIma.length
+        ? 'Image ' + withIma.map(function (s) { return s.label; }).join(', ') +
+          ' is built with CONFIG_IMA and ships the policy, so the kernel ' +
+          'will produce a log. Nothing in this snapshot is that log. Every ' +
+          'IMA figure on this page is about what the policy can reach, not ' +
+          'about anything observed.'
+        : 'No build here carries the policy.'],
+     ['PCR 10 is not extended.',
+      'This board has no TPM chip. The demo TPM is swtpm, reached through ' +
+      'a vtpm-proxy kernel module and a userspace daemon that starts long ' +
+      'after IMA initialises, so IMA finds nothing at init and runs in ' +
+      'what the kernel calls TPM-bypass. The ascii log is still written in ' +
+      'full, and that log is all verify-ima consumes \u2014 but nothing ' +
+      'extends PCR 10 and no quote can vouch for it. Closing that needs a ' +
+      'real TPM present at boot, not a proxy that appears late.'],
+     ['It is load-time evidence, not runtime.',
+      'Code that never touches the filesystem, and code that is gone ' +
+      'before the next measurement, leaves nothing here either. The TOCTOU ' +
+      'objection is narrowed by this, not closed.'],
+     ['Early boot depends on the command line, not the policy file.',
+      'A policy loaded through securityfs cannot retroactively measure what ' +
+      'ran before it. This image passes ima_policy=tcb on the kernel ' +
+      'command line so early boot is covered by the built-in rules, and ' +
+      'the shipped policy narrows things afterwards. A log produced this ' +
+      'way has two regimes in it, and reads honestly only if you know that.']
+    ].forEach(function (pair) {
+      var box = el('div', 'limit');
+      box.appendChild(el('div', 'objection-claim', pair[0]));
+      box.appendChild(el('p', 'prose', pair[1]));
+      view.appendChild(box);
+    });
+
+    var back = el('p', 'prose');
+    var l1 = el('a', null, 'The arguments against all of this');
+    l1.href = '#/objections';
     back.appendChild(l1);
     back.appendChild(document.createTextNode(' \u00b7 '));
     var l2 = el('a', null, 'Back to the verification');
@@ -2010,6 +2313,7 @@
       else if (hash === '#/assessment') renderAssessment(verified);
       else if (hash === '#/impact') renderImpact(verified);
       else if (hash === '#/objections') renderObjections(verified);
+      else if (hash === '#/runtime') renderRuntime(verified);
       else if ((m = hash.match(/^#\/hash\/(.*)$/))) {
         renderHash(verified, decodeURIComponent(m[1]));
       } else if ((m = hash.match(/^#\/pkg\/([^?]*)(?:\?build=([A-Za-z0-9._-]+))?$/))) {

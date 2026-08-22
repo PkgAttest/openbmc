@@ -1,0 +1,89 @@
+# Suggested IMA policy for a package-measured image.
+#
+# Written to be judged: every rule here exists so that an event in
+# ascii_runtime_measurements can be resolved against the build's
+# pkg-measurements document by `pkgattest verify-ima`. A rule that produces
+# events nobody can adjudicate is not security, it is noise that trains an
+# operator to ignore the log.
+#
+# The design rule is: MEASURE CODE, NOT DATA.
+#
+# IMA has no path-based matching -- there is no way to say "measure /usr,
+# skip /var". Rules match on function, mask, uid, fsmagic and LSM label.
+# So scope is chosen by *function* instead: what gets executed, mapped
+# executable, or loaded by the kernel. That set is almost exactly the set a
+# package installs and never modifies, which is the set the build measured.
+#
+# What this deliberately does NOT do, and why:
+#
+#   func=FILE_CHECK mask=^MAY_READ euid=0
+#       The kernel's built-in "tcb" policy includes this: measure every file
+#       root reads. On a BMC that is journal segments, /var/lib state, lease
+#       files, sysfs-backed configs -- thousands of events per boot, none of
+#       them installed by a package, all of them landing in verify-ima's
+#       "unmeasured" bucket. The finding that matters (a path that ran and
+#       belongs to no package) would be buried under state files that were
+#       never supposed to belong to one. Narrow beats complete here.
+#
+#   appraise
+#       Enforcement, not measurement. It needs signed security.ima xattrs on
+#       every file and a key in the kernel keyring; without both the board
+#       does not boot. Orthogonal to this project: appraisal answers "may
+#       this run", the transparency log answers "was this ever published".
+
+# --- pseudo-filesystems: nothing here is installed by a package ----------
+# Listed explicitly rather than relying on the built-in policy, because a
+# policy loaded through securityfs replaces the built-in rules wholesale.
+# PROC_SUPER_MAGIC
+dont_measure fsmagic=0x9fa0
+# SYSFS_MAGIC
+dont_measure fsmagic=0x62656572
+# DEBUGFS_MAGIC
+dont_measure fsmagic=0x64626720
+# TMPFS_MAGIC
+dont_measure fsmagic=0x01021994
+# RAMFS_MAGIC
+dont_measure fsmagic=0x858458f6
+# DEVPTS_SUPER_MAGIC
+dont_measure fsmagic=0x1cd1
+# BINFMTFS_MAGIC
+dont_measure fsmagic=0x42494e4d
+# SECURITYFS_MAGIC
+dont_measure fsmagic=0x73636673
+# SELINUX_MAGIC
+dont_measure fsmagic=0xf97cff8c
+# SMACK_MAGIC
+dont_measure fsmagic=0x43415d53
+# CGROUP_SUPER_MAGIC
+dont_measure fsmagic=0x27e0eb
+# CGROUP2_SUPER_MAGIC
+dont_measure fsmagic=0x63677270
+# NSFS_MAGIC
+dont_measure fsmagic=0x6e736673
+# EFIVARFS_MAGIC
+dont_measure fsmagic=0xde5e81e4
+# OVERLAYFS_SUPER_MAGIC -- the lower layer is measured through the rootfs;
+# measuring the merged view again would double-count every read.
+dont_measure fsmagic=0x794c7630
+
+# --- code ----------------------------------------------------------------
+# Everything executed. This is the rule that makes "a path that ran and
+# belongs to no package" detectable at all.
+measure func=BPRM_CHECK
+
+# Every shared object mapped executable. Without this, a program whose
+# binary is untouched but whose libc was swapped measures clean.
+measure func=MMAP_CHECK mask=MAY_EXEC
+
+# Kernel modules. On this image kernel-module-* is 1,871 of the 2,132
+# measured packages, so leaving these out would exclude 88% of the package
+# set from any runtime check.
+measure func=MODULE_CHECK
+
+# Firmware blobs the kernel pulls from the rootfs. Installed by packages,
+# loaded into devices, and invisible to every other rule here.
+measure func=FIRMWARE_CHECK
+
+# The policy itself, so the log records which rules were in force. Without
+# it a log is uninterpretable: "no findings" and "no rules" look identical.
+measure func=POLICY_CHECK

@@ -1,0 +1,14 @@
+[Unit]
+Description=Load the package-integrity IMA measurement policy
+DefaultDependencies=no
+After=systemd-modules-load.service local-fs.target
+Before=sysinit.target
+ConditionPathExists=/sys/kernel/security/ima
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/pkg-integrity/ima-policy-load.sh
+
+[Install]
+WantedBy=sysinit.target

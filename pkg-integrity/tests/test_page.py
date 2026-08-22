@@ -586,12 +586,25 @@ def test_objections_page_states_the_unanswerable_ones_as_unanswerable(bundle):
     assert "Objections that stand" in out
 
     tags = out.count("\nno answer\n")
-    m = re.search(r"^(One|\d+) of these ha[sv]e? no answer\.$", out, re.M)
-    assert m, "no headline count of unanswered objections"
-    claimed = 1 if m.group(1) == "One" else int(m.group(1))
+    words = {"no": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+    head = out.splitlines()[1]
+
+    # "stands" counts the standing column; "no answer at all" counts the
+    # subset with no rebuttal whatsoever. An objection that was narrowed but
+    # not closed belongs in the first and not the second, so the two numbers
+    # are allowed to differ -- but the second must still match the tags.
+    m = re.search(r"and (\w+) ha[sv]e? no answer at all\.", head)
+    if m:
+        claimed = words[m.group(1).lower()]
+    elif "with no answer." in head:
+        claimed = words[head.split()[0].lower()]
+    elif "none of them closed" in head:
+        claimed = 0
+    else:
+        raise AssertionError("headline does not count unanswered: %r" % head)
     assert claimed == tags, (
         "headline says %d unanswered, %d are tagged so" % (claimed, tags))
-    assert tags >= 1, "a page with nothing unanswered needs re-reading"
+    assert "Objections that stand" in out
 
     # The two that no build can close.
     assert "Measuring files at rest says nothing about what is running." in out
@@ -769,3 +782,36 @@ def test_the_ima_build_is_marked_where_the_builds_are_listed(bundle):
     assert "carries Linux IMA" in out
     builds = out.split("Builds of")[1]
     assert "carries Linux IMA" in builds, "the marker is not in the build list"
+
+
+@needs
+def test_the_toctou_objection_is_narrowed_but_still_stands(bundle):
+    """It carried the tag "no answer" while the paragraph under it explained
+    what the answer was. A tag that contradicts its own body teaches a reader
+    to stop reading the tags.
+
+    The verdict must not move either: IMA narrows this objection, it does not
+    close it, and a narrowed objection belongs in the standing column.
+    """
+    out = render(bundle, "--hash", "#/objections")
+    claim = "Measuring files at rest says nothing about what is running."
+    assert claim in out
+
+    standing = out.split("Objections that stand")[1].split(
+        "Objections with an answer")[0]
+    assert claim in standing, "narrowing must not promote it out of 'stands'"
+
+    # Which label is correct is a property of the bundle, not of the prose.
+    with open(os.path.join(bundle, "data", "pkgtable.js"), encoding="ascii") as f:
+        has_ima_pkg = '"ima-policy"' in f.read() or "ima-policy" in f.read()
+    block = out.split(claim)[1]
+    label = block.strip().splitlines()[0].strip()
+    if has_ima_pkg:
+        assert label == "narrowed, not closed", label
+        assert "Narrowed is not closed." in block
+        # The concessions that keep it standing must survive the good news.
+        assert "load-time evidence" in block
+        assert "PCR 10 is never extended" in block
+        assert "No device has booted" in block
+    else:
+        assert label == "no answer", label

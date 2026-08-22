@@ -1451,39 +1451,62 @@
            'commits to. That is not a rough edge, it is a way through.'
          ] };
 
+   // The TOCTOU objection still STANDS -- nothing here closes it -- but
+   // "no answer" stopped being true the moment an image shipped with IMA.
+   // A tag that contradicts the paragraph under it teaches a reader to skip
+   // the tags, so it is derived from the same data as everything else.
+   var withIma = imaScope(r).filter(function (sc) { return sc.hasPolicy; });
+   var runtimeBody = [
+     'A file is measured when the image is built and again when the BMC ' +
+     'boots. Neither says anything about a process compromised after it ' +
+     'loaded. The literature calls this the TOCTOU problem in remote ' +
+     'attestation and describes it as unsolved: transient malware can ' +
+     'infect a device, do its work, and erase itself before the next ' +
+     'attestation, leaving nothing to measure.',
+     'This approach is about substitution in the supply chain \u2014 a ' +
+     'different package arriving in a build. It is not about compromise ' +
+     'of a running system, and nothing here should be read as covering ' +
+     'the second.'
+   ];
+   if (withIma.length) {
+     runtimeBody.push(
+       'It is narrower than it was. Image ' +
+       withIma.map(function (sc) { return sc.label; }).join(', ') +
+       ' is built with CONFIG_IMA and ships a measurement policy, and ' +
+       'pkgattest verify-ima judges each event in the kernel\'s log ' +
+       'against these measurements \u2014 catching a measured path whose ' +
+       'content changed, and a path that executed while belonging to no ' +
+       'package. Neither half produces those findings alone.');
+     runtimeBody.push(
+       'What is still open, and it is the whole objection: this is ' +
+       'load-time evidence. Code that never touches the filesystem, and ' +
+       'code that is gone before the next measurement, leaves nothing ' +
+       'behind either way. No device has booted that image, so nothing ' +
+       'here has been observed. And PCR 10 is never extended on this ' +
+       'board, so no quote vouches for the log \u2014 it is a text file a ' +
+       'compromised host could write. Narrowed is not closed.');
+   }
+   var runtimeVerdict = {
+     verdict: 'stands',
+     label: withIma.length ? 'narrowed, not closed' : 'no answer',
+     body: runtimeBody
+   };
+
+   var computed = { unowned: unownedVerdict, runtime: runtimeVerdict };
    return OBJECTIONS.map(function (o) {
-     if (o.id !== 'unowned') return o;
-     return { id: o.id, claim: o.claim, verdict: unownedVerdict.verdict,
-              label: unownedVerdict.label, body: unownedVerdict.body };
+     var c = o.id && computed[o.id];
+     if (!c) return o;
+     return { id: o.id, claim: o.claim, verdict: c.verdict,
+              label: c.label, body: c.body };
    });
   }
 
   var OBJECTIONS = [
     {
+      id: 'runtime',
       verdict: 'stands', label: 'no answer',
       claim: 'Measuring files at rest says nothing about what is running.',
-      body: [
-        'A file is measured when the image is built and again when the BMC ' +
-        'boots. Neither says anything about a process compromised after it ' +
-        'loaded. The literature calls this the TOCTOU problem in remote ' +
-        'attestation and describes it as unsolved: transient malware can ' +
-        'infect a device, do its work, and erase itself before the next ' +
-        'attestation, leaving nothing to measure.',
-        'This approach is about substitution in the supply chain \u2014 a ' +
-        'different package arriving in a build. It is not about compromise ' +
-        'of a running system, and nothing here should be read as covering ' +
-        'the second.',
-        'It is narrower than it was. One image in this line is built with ' +
-        'CONFIG_IMA and ships a measurement policy, and pkgattest ' +
-        'verify-ima judges each event in the kernel\'s log against these ' +
-        'measurements \u2014 catching a measured path whose content changed, ' +
-        'and a path that executed while belonging to no package. That is ' +
-        'load-time evidence, not runtime: code that never touches the ' +
-        'filesystem, or that is gone before the next measurement, still ' +
-        'leaves nothing behind. No device has booted that image yet, so ' +
-        'nothing here has been observed. The objection stands; it covers ' +
-        'less ground than it did.'
-      ]
+      body: ['(computed per build)']
     },
     {
       id: 'unowned',
@@ -1650,17 +1673,36 @@
     var live = objections(r);
     var standing = live.filter(function (o) { return o.verdict === 'stands'; });
 
+    // "N have no answer" was counting everything that stands, which stopped
+    // being the same thing once one of them acquired a partial answer
+    // without being closed by it.
+    var unanswered = standing.filter(function (o) {
+      return o.label === 'no answer';
+    });
+
     view.appendChild(el('p', 'eyebrow', 'arguments against this approach'));
-    view.appendChild(el('p', 'thesis',
-      standing.length === 1 ? 'One of these has no answer.'
-                            : standing.length + ' of these have no answer.'));
+    var n = standing.length;
+    var word = (n >= 0 && n < WORDS.length) ? WORDS[n] : group(n);
+    var head = word.charAt(0).toUpperCase() + word.slice(1) +
+               ' of these ' + (n === 1 ? 'stands' : 'stand');
+    if (unanswered.length === n) {
+      head += n === 1 ? ', with no answer.' : ', with no answer.';
+    } else if (unanswered.length === 0) {
+      head += ', none of them closed.';
+    } else {
+      head += ', and ' + (unanswered.length === 1
+        ? 'one has no answer at all.'
+        : WORDS[unanswered.length] + ' have no answer at all.');
+    }
+    view.appendChild(el('p', 'thesis', head));
 
     view.appendChild(el('p', 'prose',
       'Everything on this page is argument rather than arithmetic, so it is ' +
       'set in the asserting typeface throughout \u2014 nothing below was computed ' +
       'by your browser. The objections are stated in the strongest form ' +
-      'found for them, and the ones with no rebuttal are marked as having ' +
-      'none.'));
+      'found for them. An objection that something narrowed but did not ' +
+      'close still stands, and is tagged for what it is rather than being ' +
+      'moved into the answered column.'));
 
     ['stands', 'answered', 'conceded'].forEach(function (group) {
       var heading = { stands: 'Objections that stand',

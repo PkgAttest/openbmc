@@ -47,15 +47,13 @@ function loadScripts(files) {
 const dataDir = abs('data');
 const buildFiles = fs.readdirSync(path.join(dataDir, 'builds')).sort()
   .map(n => 'data/builds/' + n);
-const pkgFiles = fs.readdirSync(dataDir).filter(n => n.startsWith('pkgs-'))
-  .sort().map(n => 'data/' + n);
-const fileFiles = fs.readdirSync(dataDir).filter(n => n.startsWith('files-'))
+const memberFiles = fs.readdirSync(dataDir).filter(n => n.startsWith('members-'))
   .sort().map(n => 'data/' + n);
 
 const ctx = loadScripts([
   'vendor/pkgcrypto.js', 'verify.js',
   'data/snapshot.js', 'data/leaves.js', 'data/sth-history.js',
-  'data/builds-index.js', ...buildFiles, ...pkgFiles, ...fileFiles,
+  'data/builds-index.js', 'data/pkgtable.js', ...buildFiles, ...memberFiles,
 ]);
 
 const V = ctx.PKGI_VERIFY;
@@ -227,9 +225,24 @@ const byLeafHash = new Map(signedLeaves.map((h, i) => [V.hex(h), i]));
 for (const b of D.builds) {
  try {
   const short = b.device_root.slice(0, 16);
-  const pkgs = D['pkgs_' + short];
-  const files = D['files_' + short];
-  if (!pkgs || !files) { problems.push(`${b.label}: missing package data`); continue; }
+  // Rebuilt from the shared table, exactly as the page does it.
+  const table = D.pkgtable;
+  const members = D['members_' + short];
+  if (!table || !members) {
+    problems.push(`${b.label}: missing package data`); continue;
+  }
+  const pkgs = [], files = [];
+  let broken = null;
+  for (const mi of members) {
+    const e = table[mi];
+    if (!e) { broken = mi; break; }
+    pkgs.push([e[0], e[1], e[2], e[3].length]);
+    files.push([e[0], e[3]]);
+  }
+  if (broken !== null) {
+    problems.push(`${b.label}: members index ${broken} is not in pkgtable`);
+    continue;
+  }
 
   // The per-build file must agree with the index that drives this loop.
   const detail = D['build_' + b.label];

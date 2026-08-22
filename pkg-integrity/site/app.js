@@ -45,6 +45,17 @@
     return wrap;
   }
 
+  // Small counts read as words in a headline; anything larger stays a
+  // numeral rather than inventing an English number speller.
+  var WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven',
+               'eight', 'nine', 'ten', 'eleven', 'twelve'];
+  function count(n, noun) {
+    var w = (n >= 0 && n < WORDS.length) ? WORDS[n] : group(n);
+    return (n === 1 ? 'One ' + noun
+                    : w.charAt(0).toUpperCase() + w.slice(1) + ' ' +
+                      noun + 's');
+  }
+
   function group(n) {
     return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }
@@ -142,8 +153,21 @@
 
     out.builds = (D.builds || []).map(function (b) {
       var short = b.device_root.slice(0, 16);
-      var pkgs = D['pkgs_' + short];
-      var files = D['files_' + short];
+      // The bundle ships one entry per distinct package and, per build, the
+      // list of table rows it is made of. Rebuild the per-build view here so
+      // nothing downstream has to know the wire format changed.
+      var table = D.pkgtable;
+      var members = D['members_' + short];
+      var pkgs = null, files = null;
+      if (table && members) {
+        pkgs = []; files = [];
+        for (var mi = 0; mi < members.length; mi++) {
+          var e = table[members[mi]];
+          if (!e) { pkgs = files = null; break; }
+          pkgs.push([e[0], e[1], e[2], e[3].length]);
+          files.push([e[0], e[3]]);
+        }
+      }
       var result = { meta: b, unaccounted: null, deviceRootOk: null,
                      pkgs: null, filesByName: null, leafHexes: null };
 
@@ -383,10 +407,23 @@
 
     // The thesis, in the asserting voice -- because the sentence itself is a
     // claim; the receipt below is what makes it checkable.
+    //
+    // Counted, not written down. This said "Both images" from the day there
+    // were two, and was still saying it at five. It is the one sentence on a
+    // page whose whole discipline is "recompute it" that nobody was
+    // recomputing.
+    var nb = r.builds.length;
+    var unpub = 0;
+    r.builds.forEach(function (b) {
+      unpub += b.unaccounted ? b.unaccounted.length : 0;
+    });
     var thesis = el('p', 'thesis');
     thesis.appendChild(document.createTextNode(
-      'Both images carry a valid signature. '));
-    thesis.appendChild(el('span', 'turn', 'One package was never published.'));
+      (nb === 2 ? 'Both images' : count(nb, 'image')) +
+      ' carr' + (nb === 1 ? 'ies' : 'y') + ' a valid signature. '));
+    thesis.appendChild(el('span', 'turn', unpub === 1
+      ? 'One package was never published.'
+      : count(unpub, 'package') + ' were never published.'));
     view.appendChild(thesis);
 
     // ---- the receipt ----
@@ -1346,7 +1383,7 @@
       if (b.pkgs) {
         b.pkgs.forEach(function (row, i) {
           if (row[0] === UNOWNED_NAME) {
-            found = { count: row[4], leaf: b.leafHexes[i] };
+            found = { count: row[3], leaf: b.leafHexes[i] };
           }
         });
       }
@@ -2165,7 +2202,7 @@
     var arch = {}, zero = 0, kernel = 0, kernelFiles = 0, totalFiles = 0;
     pkgs.forEach(function (row) {
       arch[row[2]] = (arch[row[2]] || 0) + 1;
-      var n = row[4];
+      var n = row[3];
       totalFiles += n;
       if (n === 0) zero++;
       if (row[0].indexOf('kernel-') === 0) { kernel++; kernelFiles += n; }
@@ -2353,11 +2390,9 @@
 
     // Leaves are the bulk of the download, so they load only when something
     // is actually going to be verified -- which is immediately, here.
-    var needed = ['data/leaves.js'];
+    var needed = ['data/leaves.js', 'data/pkgtable.js'];
     (D.builds || []).forEach(function (b) {
-      var short = b.device_root.slice(0, 16);
-      needed.push('data/pkgs-' + short + '.js');
-      needed.push('data/files-' + short + '.js');
+      needed.push('data/members-' + b.device_root.slice(0, 16) + '.js');
     });
 
     var pending = needed.length;

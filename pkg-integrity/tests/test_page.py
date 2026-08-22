@@ -65,7 +65,20 @@ def test_landing_page_states_the_case(bundle):
     out = render(bundle)
 
     # The thesis, and the answer it promises.
-    assert "Both images carry a valid signature." in out
+    #
+    # Asserted as a property, not as a literal. The old version of this test
+    # pinned "Both images", which is what let that sentence go on saying
+    # "Both" from two builds all the way to five -- the test was holding the
+    # bug in place.
+    words = {1: "One", 2: "Both", 3: "Three", 4: "Four", 5: "Five",
+             6: "Six", 7: "Seven", 8: "Eight"}
+    builds = len(json.loads(re.search(
+        r'PKGI_DATA\["builds"\] = (\[.*\]);',
+        open(os.path.join(bundle, "data", "builds-index.js")).read()).group(1)))
+    expected = "%s image%s carr%s a valid signature." % (
+        words[builds], "" if builds == 1 else "s",
+        "ies" if builds == 1 else "y")
+    assert expected in out, "thesis does not match the %d builds shipped" % builds
     assert "One package was never published." in out
     assert "dropbear 2026.91-r0" in out
 

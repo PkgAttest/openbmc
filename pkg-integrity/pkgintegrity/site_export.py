@@ -478,6 +478,36 @@ def export(base, out_dir, store_dir=None, artifacts_dir=None, pub_path=None):
               "file_count", "status", "unpublished_count", "image_attested")}
             for b in builds])
 
+    # One entry per DISTINCT package rather than per (build, package).
+    #
+    # A package's identity is its leaf_hash, and the leaf_hash is a function
+    # of exactly the fields below -- so two builds that share a leaf_hash
+    # share these bytes, and shipping them twice ships them twice for
+    # nothing. Across A-E that is 10,655 rows collapsing to 2,164: four
+    # fifths of the largest thing this bundle downloads.
+    #
+    # (name, version, arch) is NOT the key. Image E rebuilt 28 kernel
+    # modules whose version never moved, so the same triple legitimately
+    # names two different file sets. Keying on anything but the leaf hash
+    # would silently serve one build's files for another's package.
+    table, pkg_index = [], {}
+    for b in builds:
+        for p in b["_doc"]["packages"]:
+            if p["leaf_hash"] not in pkg_index:
+                pkg_index[p["leaf_hash"]] = None
+    # Sorted by name first so related file lists sit next to each other and
+    # gzip can see across them; the leaf hash breaks ties deterministically.
+    ordered = sorted(
+        {p["leaf_hash"]: p
+         for b in builds for p in b["_doc"]["packages"]}.values(),
+        key=lambda p: (p["name"], p["version"], p["arch"], p["leaf_hash"]))
+    for i, p in enumerate(ordered):
+        pkg_index[p["leaf_hash"]] = i
+        table.append([p["name"], p["version"], p["arch"],
+                      [[f["path"], f["sha256"]] for f in p["files"]]])
+    written["data/pkgtable.js"] = _js(
+        os.path.join(data_dir, "pkgtable.js"), "pkgtable", table)
+
     for b in builds:
         doc = b["_doc"]
         root = b["device_root"]
@@ -492,19 +522,11 @@ def export(base, out_dir, store_dir=None, artifacts_dir=None, pub_path=None):
                  "image_attested", "member_indices", "artifacts",
                  "receipt")})
 
-        rel = "data/pkgs-%s.js" % root[:16]
+        rel = "data/members-%s.js" % root[:16]
         written[rel] = _js(
-            os.path.join(data_dir, "pkgs-%s.js" % root[:16]),
-            "pkgs_" + root[:16],
-            [[p["name"], p["version"], p["arch"], p["leaf_hash"],
-              len(p["files"])] for p in doc["packages"]])
-
-        rel = "data/files-%s.js" % root[:16]
-        written[rel] = _js(
-            os.path.join(data_dir, "files-%s.js" % root[:16]),
-            "files_" + root[:16],
-            [[p["name"], [[f["path"], f["sha256"]] for f in p["files"]]]
-             for p in doc["packages"]])
+            os.path.join(data_dir, "members-%s.js" % root[:16]),
+            "members_" + root[:16],
+            [pkg_index[p["leaf_hash"]] for p in doc["packages"]])
 
     # Pages must not run Jekyll over the bundle.
     with open(os.path.join(out_dir, ".nojekyll"), "w") as f:

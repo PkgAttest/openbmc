@@ -803,3 +803,103 @@ def test_unowned_leaf_is_a_pure_function_of_its_files(tmp_path):
     pre = rebuilt.preimage().decode()
     assert pre.startswith("pkg-leaf-v1\nname=(unowned)\nversion=1.0\n")
     assert doc["image_name"] not in pre and doc["timestamp"] not in pre
+
+
+# ----------------------------------------------- the deduplicated pkg table
+def _data(bundle, name):
+    """Read one PKGI_DATA file back out of a bundle."""
+    with open(os.path.join(bundle, "data", name), encoding="ascii") as f:
+        body = f.read()
+    m = re.search(r'PKGI_DATA\[".*?"\] = (.*);\n\Z', body, re.S)
+    assert m, "%s is not a PKGI_DATA file" % name
+    return json.loads(m.group(1))
+
+
+@pytest.mark.skipif(not os.path.exists(REAL_LOG),
+                    reason="production log store not present")
+def test_package_table_holds_each_distinct_package_exactly_once(tmp_path):
+    out = tmp_path / "dist"
+    site_export.export(BASE, str(out), pub_path=PUB)
+    table = _data(str(out), "pkgtable.js")
+
+    # Identity is the leaf hash. Two entries with the same one would be the
+    # dedup failing to dedup; the same (name, version, arch) twice is fine
+    # and expected -- image E rebuilt 28 kernel modules without moving a
+    # version.
+    leaves = [canonical.PkgLeaf(n, v, a, [(p, h) for p, h in fs]).leaf_hash()
+              for n, v, a, fs in table]
+    assert len(set(leaves)) == len(table), "pkgtable contains a duplicate"
+
+    docs = [json.load(open(os.path.join(REAL_ART, d, f)))
+            for d in sorted(os.listdir(REAL_ART))
+            if os.path.isdir(os.path.join(REAL_ART, d))
+            for f in os.listdir(os.path.join(REAL_ART, d))
+            if f.endswith(".pkg-measurements.json")]
+    distinct = {p["leaf_hash"] for doc in docs for p in doc["packages"]}
+    assert len(table) == len(distinct)
+    assert set(leaves) == distinct
+
+
+@pytest.mark.skipif(not os.path.exists(REAL_LOG),
+                    reason="production log store not present")
+def test_each_build_reconstructs_byte_for_byte_from_the_table(tmp_path):
+    """The dedup is only safe if every build rebuilds to exactly what its
+    measurement document said. A mixed-up index would hand one build another
+    build's files -- which is the failure this whole project exists to
+    detect, so it must not be possible to ship it."""
+    out = tmp_path / "dist"
+    manifest = site_export.export(BASE, str(out), pub_path=PUB)
+    table = _data(str(out), "pkgtable.js")
+
+    for b in manifest["builds"]:
+        short = b["device_root"][:16]
+        members = _data(str(out), "members-%s.js" % short)
+        doc = None
+        for d in sorted(os.listdir(REAL_ART)):
+            p = os.path.join(REAL_ART, d,
+                             "obmc-phosphor-image-raspberrypi3-64"
+                             ".pkg-measurements.json")
+            if os.path.exists(p):
+                cand = json.load(open(p))
+                if cand["merkle_root"] == b["device_root"]:
+                    doc = cand
+                    break
+        assert doc, "no measurement document for build %s" % b["label"]
+        assert len(members) == len(doc["packages"])
+
+        for idx, pkg in zip(members, doc["packages"]):
+            name, version, arch, files = table[idx]
+            assert name == pkg["name"]
+            assert version == pkg["version"]
+            assert arch == pkg["arch"]
+            assert [[f["path"], f["sha256"]] for f in pkg["files"]] == files
+
+        # And the composed root still lands where the document says.
+        leaves = [canonical.PkgLeaf(
+            table[i][0], table[i][1], table[i][2],
+            [(p, h) for p, h in table[i][3]]).leaf_hash()
+            for i in members]
+        assert merkle.device_root(leaves) == doc["merkle_root"]
+
+
+@pytest.mark.skipif(not os.path.exists(REAL_LOG),
+                    reason="production log store not present")
+def test_a_new_build_costs_a_small_index_not_another_copy(tmp_path):
+    """The point of the table: publishing another image must not add another
+    full file list to the first-visit download."""
+    out = tmp_path / "dist"
+    manifest = site_export.export(BASE, str(out), pub_path=PUB)
+    data = os.path.join(str(out), "data")
+
+    table_bytes = os.path.getsize(os.path.join(data, "pkgtable.js"))
+    for b in manifest["builds"]:
+        member = os.path.join(data,
+                              "members-%s.js" % b["device_root"][:16])
+        # Each build's own eager cost is a list of integers, which must stay
+        # a rounding error against the shared table.
+        assert os.path.getsize(member) < table_bytes / 20, b["label"]
+
+    # No per-build package or file list may come back.
+    stale = [n for n in os.listdir(data)
+             if n.startswith("pkgs-") or n.startswith("files-")]
+    assert not stale, stale

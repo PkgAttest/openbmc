@@ -724,3 +724,48 @@ def test_objections_page_concedes_the_unbacked_log(bundle):
     out = render(bundle, "--hash", "#/objections")
     assert "just a text file" in out
     assert "does not make the log authentic" in out
+
+
+@needs
+def test_every_route_is_in_the_masthead(bundle):
+    """A page reachable only from the last paragraph is a page nobody finds.
+
+    #/runtime shipped with a link in the closing paragraph of the landing
+    page and nowhere else, and went unnoticed for exactly that reason. A
+    "does it have a link anywhere" test would have passed on it, so this
+    checks the actual navigation instead.
+
+    Anything deliberately kept out of the masthead has to be named here, in
+    writing, with a reason.
+    """
+    NOT_IN_NAV = {
+        # Reached from a prominent block in the landing page body, next to
+        # the two other "read more" links, rather than from the nav.
+        "#/stats",
+    }
+    with open(os.path.join(bundle, "app.js"), encoding="ascii") as f:
+        app = f.read()
+    with open(os.path.join(bundle, "index.html"), encoding="utf-8") as f:
+        html = f.read()
+
+    routed = set(re.findall(r"hash === '(#/[a-z]+)'", app))
+    assert routed, "no static routes found in the router"
+
+    nav = html.split('class="masthead-nav"')[1].split("</nav>")[0]
+    in_nav = set(re.findall(r'href="(#/[a-z]*)"', nav))
+
+    missing = sorted(routed - in_nav - NOT_IN_NAV)
+    assert not missing, (
+        "routes the masthead does not offer: %s -- add them to the nav, or "
+        "add them to NOT_IN_NAV with a reason" % missing)
+
+
+@needs
+def test_the_ima_build_is_marked_where_the_builds_are_listed(bundle):
+    # The landing page is where a reader looks at builds; if one of them can
+    # produce a runtime measurement log, that is a property of the build and
+    # belongs on its row, not only in a footer link.
+    out = render(bundle)
+    assert "carries Linux IMA" in out
+    builds = out.split("Builds of")[1]
+    assert "carries Linux IMA" in builds, "the marker is not in the build list"

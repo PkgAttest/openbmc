@@ -460,6 +460,14 @@
     view.appendChild(el('h2', null,
       'Builds of ' + (r.builds[0] ? r.builds[0].meta.image_line : 'this line')));
 
+    // Which builds can produce a runtime measurement log. Derived from the
+    // package set, not written down: a build carries it iff it installs the
+    // policy package.
+    var ima = {};
+    imaScope(r).forEach(function (sc) {
+      if (sc.hasPolicy) ima[sc.label] = true;
+    });
+
     r.builds.forEach(function (b) {
       var m = b.meta;
       var missing = b.unaccounted;
@@ -473,6 +481,14 @@
         group(m.package_count) + ' packages, ' + group(m.file_count) +
         ' measured files'));
       mid.appendChild(el('div', 'build-id', m.build_id));
+      if (ima[m.label]) {
+        var note = el('div', 'build-id');
+        note.appendChild(document.createTextNode('carries Linux IMA \u2014 '));
+        var ia = el('a', null, 'what that measures at runtime');
+        ia.href = '#/runtime';
+        note.appendChild(ia);
+        mid.appendChild(note);
+      }
       row.appendChild(mid);
 
       var verdict;
